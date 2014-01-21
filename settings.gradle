@@ -1,1 +1,0 @@
-include ':SFMS', ':SFMS:libs:roundware-android-framework', ':SFMS:libs', ':SFMS:libs:google-play-services_lib'
