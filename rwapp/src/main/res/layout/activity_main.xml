@@ -134,16 +134,6 @@
                         android:layout_marginBottom="10dp"
                         />
 
-                <Button
-                        style="@style/AppTheme.FeedbackButton"
-                        android:id="@+id/infoFeedbackButton"
-                        android:layout_width="match_parent"
-                        android:layout_height="48dp"
-                        android:background="@drawable/feedback_button"
-                        android:contentDescription="@string/home_feedback_button_description"
-                        android:text="@string/button_feedback"
-                        />
-
             </LinearLayout>
 
             <RelativeLayout
