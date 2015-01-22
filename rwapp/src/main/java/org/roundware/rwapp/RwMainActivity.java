@@ -402,17 +402,6 @@ public class RwMainActivity extends Activity {
                 mViewFlipper.showPrevious();
             }
         });
-
-        mFeedbackButton = (Button)findViewById(R.id.infoFeedbackButton);
-        mFeedbackButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                mViewFlipper.showPrevious();
-                Intent intent = new Intent(getApplicationContext(), ClassRegistry.get("RwSpeakActivity"));
-                intent.setAction(RwSpeakActivity.ACTION_RECORD_FEEDBACK);
-                startActivity(intent);
-            }
-        });
     }
 
 
