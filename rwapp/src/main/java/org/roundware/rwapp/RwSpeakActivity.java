@@ -26,6 +26,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
 import android.webkit.WebSettings;
@@ -47,15 +48,14 @@ import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.MarkerOptions;
 
 import org.roundware.rwapp.utils.ClassRegistry;
+import org.roundware.rwapp.utils.LevelMeterView;
+import org.roundware.rwapp.utils.Utils;
 import org.roundware.service.RW;
 import org.roundware.service.RWRecordingTask;
 import org.roundware.service.RWService;
 import org.roundware.service.RWTags;
 import org.roundware.service.util.RWList;
 import org.roundware.service.util.RWListItem;
-
-import org.roundware.rwapp.utils.LevelMeterView;
-import org.roundware.rwapp.utils.Utils;
 
 import java.io.IOException;
 import java.util.Timer;
@@ -73,6 +73,12 @@ public class RwSpeakActivity extends Activity {
 
     // preferences keys for state storage
     public final static String PREFS_KEY_LEGAL_NOTICE_ACCEPTED = "SavedLegalNoticeAccepted";
+
+    // key for done button
+    public final static String EXTRA_KEY_DONE_ICON = "doneIcon";
+
+    // key for done label
+    public final static String EXTRA_KEY_DONE_TEXT = "doneText";
 
     // tag values for user feedback recording
     private final static int FEEDBACK_QUESTION_TAG_ID = 21;
@@ -94,14 +100,25 @@ public class RwSpeakActivity extends Activity {
 
 
     // NOTE: Order must match R.layout.activity_speak
-    private static final int RECORD_LAYOUT = 0;
-    private static final int FILTER_LAYOUT = 1;
+    private static final int FILTER_LAYOUT = 0;
+    private static final int RECORD_LAYOUT = 1;
     private static final int THANKS_LAYOUT = 2;
+
+    private enum RecordingState{
+        RECORD_PROMPT,
+        LEADIN_COUNTDOWN,
+        RECORDING,
+        PLAYBACK_PROMPT,
+        PLAYING
+    };
+    private RecordingState mCurrentRecordingState = RecordingState.RECORD_PROMPT;
 
     // fields
     private ViewFlipper mViewFlipper;
     protected ImageView mBackgroundImageView;
     private WebView mWebView;
+    private String mWebViewBaseUrl;
+    private String mWebViewData;
     private Button mAgreeButton;
     private Button mDeclineButton;
     private View mSpeakInstructionsView;
@@ -111,13 +128,12 @@ public class RwSpeakActivity extends Activity {
     private ToggleButton mRecordButton;
     private Button mRerecordButton;
     private Button mUploadButton;
-    private Button mListenMoreButton;
+    private Button mDoneButton;
     private Button mSpeakMoreButton;
     private RWService mRwBinder;
     private RWTags mProjectTags;
     private RWList mTagsList;
     private RWRecordingTask mRecordingTask;
-    private boolean mHasRecording = false;
     private Timer mRecordingLeadInTimer;
     private int mLeadInCounter;
     private SoundPool mSoundPool;
@@ -127,7 +143,7 @@ public class RwSpeakActivity extends Activity {
     private Handler mPlaybackHandler = null;
     private int mPlaybackTimerCount = 0;
     private boolean mIsRecordingGeneralFeedback = false;
-    private String mContentFileDir;
+    private boolean mIsPendingFilterLoad = false;
     private MapView mMapView;
     private GoogleMap mGoogleMap;
 
@@ -138,9 +154,9 @@ public class RwSpeakActivity extends Activity {
 
     // click listeners
     private View.OnClickListener mRecordListener;
-    private View.OnClickListener mRerecordListener;
     private View.OnClickListener mSubmitListener;
     private View.OnClickListener mCancelListener;
+
 
     /**
      * Handles connection state to an RWService Android Service. In this
@@ -161,13 +177,14 @@ public class RwSpeakActivity extends Activity {
             mTagsList.restoreSelectionState(Settings.getSharedPreferences());
 
             // get the folder where the web content files are stored
-            mContentFileDir = mRwBinder.getContentFilesDir();
-            if ((mWebView != null) && (mContentFileDir != null)) {
-                String contentFileName = mRwBinder.getContentFilesDir() + "speak.html";
+            String contentFileDir = mRwBinder.getContentFilesDir();
+            if ((mWebView != null) && (contentFileDir != null)) {
+                String contentFileName = contentFileDir + "speak.html";
                 try {
-                    String data = mRwBinder.readContentFile(contentFileName);
-                    data = data.replace("/*%roundware_tags%*/", mTagsList.toJsonForWebView(ROUNDWARE_TAGS_TYPE));
-                    mWebView.loadDataWithBaseURL("file://" + contentFileName, data, null, null, null);
+                    mWebViewData = mRwBinder.readContentFile(contentFileName);
+                    mWebViewData = mWebViewData.replace("/*%roundware_tags%*/", mTagsList.toJsonForWebView(ROUNDWARE_TAGS_TYPE));
+                    mWebViewBaseUrl = "file://" + contentFileName;
+                    mWebView.loadDataWithBaseURL(mWebViewBaseUrl, mWebViewData, null, null, null);
                 } catch (IOException e) {
                     e.printStackTrace();
                     Log.e(TAG, "Problem loading content file: " + contentFileName);
@@ -214,24 +231,31 @@ public class RwSpeakActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Log.d(TAG, "start onCreate");
         setContentView(R.layout.activity_speak);
 
+
         mMapView = (MapView) findViewById(R.id.map);
+        Log.d(TAG, "post setcontent");
         mMapView.onCreate(savedInstanceState);
 
         final Intent intent = getIntent();
         final String action = intent.getAction();
 
-        if (ACTION_RECORD_FEEDBACK.equals(action)) {
-            mIsRecordingGeneralFeedback = true;
-        } else {
-            mIsRecordingGeneralFeedback = false;
-        }
 
+        Log.d(TAG, "pre initListeners");
         initListeners();
+        Log.d(TAG, "pre initUIWidgets");
         initUIWidgets();
+        Log.d(TAG, "pre initLeadIn");
         initLeadIn();
+        Log.d(TAG, "pre initMapIfNeeded");
         initMapIfNeeded();
+        Log.d(TAG, "post initMapIfNeeded");
+
+
+        mIsRecordingGeneralFeedback = ACTION_RECORD_FEEDBACK.equals(action);
+        setFlipperChild( mIsRecordingGeneralFeedback ? RECORD_LAYOUT : FILTER_LAYOUT);
 
         // connect to service started by other activity
         try {
@@ -240,6 +264,7 @@ public class RwSpeakActivity extends Activity {
         } catch (Exception ex) {
             showMessage(getString(R.string.connection_to_server_failed) + " " + ex.getMessage(), true, true);
         }
+        Log.d(TAG, "done onCreate");
     }
 
 
@@ -254,7 +279,7 @@ public class RwSpeakActivity extends Activity {
 
         if (mViewFlipper != null) {
             //showRecord();
-            showFilters();
+            setFlipperChild(FILTER_LAYOUT);
         }
     }
 
@@ -265,6 +290,22 @@ public class RwSpeakActivity extends Activity {
         unregisterReceiver(rwReceiver);
         if (mTagsList != null) {
             mTagsList.saveSelectionState(Settings.getSharedPreferences());
+        }
+
+        if(mViewFlipper.getDisplayedChild() == RECORD_LAYOUT) {
+            RecordingState newState;
+            switch (mCurrentRecordingState) {
+                case LEADIN_COUNTDOWN:
+                case RECORDING:
+                    newState = RecordingState.RECORD_PROMPT;
+                    break;
+                case PLAYING:
+                    newState = RecordingState.PLAYBACK_PROMPT;
+                    break;
+                default:
+                    newState = mCurrentRecordingState;
+            }
+            setRecordingState(newState);
         }
         super.onPause();
     }
@@ -285,7 +326,11 @@ public class RwSpeakActivity extends Activity {
         filter.addAction(RW.SHARING_MESSAGE);
         registerReceiver(rwReceiver, filter);
 
+        if(mViewFlipper.getDisplayedChild() == RECORD_LAYOUT){
+            setRecordingState(mCurrentRecordingState);
+        }
         updateUIState();
+
         super.onResume();
     }
 
@@ -377,26 +422,22 @@ public class RwSpeakActivity extends Activity {
         mRecordListener = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (mHasRecording) {
-                    if (mPlayer != null) {
-                        stopRecordingPlayback();
-                    } else {
-                        startRecordingPlayback();
-                    }
-                } else {
-                    if ((mRecordingTask != null) && (mRecordingTask.isRecording())) {
-                        stopRecording();
-                    } else {
-                        startRecordingLeadIn();
-                    }
+                switch(mCurrentRecordingState)
+                {
+                    case RECORD_PROMPT:
+                        setRecordingState(RecordingState.LEADIN_COUNTDOWN);
+                        break;
+                    case LEADIN_COUNTDOWN:
+                        setRecordingState(RecordingState.RECORD_PROMPT);
+                        break;
+                    case RECORDING:
+                    case PLAYING:
+                        setRecordingState(RecordingState.PLAYBACK_PROMPT);
+                        break;
+                    case PLAYBACK_PROMPT:
+                        setRecordingState(RecordingState.PLAYING);
+                        break;
                 }
-            }
-        };
-
-        mRerecordListener = new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                resetRecording();
             }
         };
 
@@ -461,7 +502,7 @@ public class RwSpeakActivity extends Activity {
                             boolean done = mTagsList.setSelectionFromWebViewMessageUri(uri);
                             if (done) {
                                 updateScreenForSelectedTags();
-                                showRecord();
+                                setFlipperChild(RECORD_LAYOUT);
                             }
                         }
                     }
@@ -469,12 +510,17 @@ public class RwSpeakActivity extends Activity {
                 }
                 // open link in external browser
                 return super.shouldOverrideUrlLoading(view, url);
+
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (mAgreeButton != null) {
                     mAgreeButton.setEnabled(true);
+                }
+                if(mIsPendingFilterLoad){
+                    mIsPendingFilterLoad = false;
+                    showFilters();
                 }
                 super.onPageFinished(view, url);
             }
@@ -506,31 +552,40 @@ public class RwSpeakActivity extends Activity {
         mUploadButton.setOnClickListener(mSubmitListener);
 
         mRerecordButton = (Button) findViewById(R.id.speakReRecordButton);
-        mRerecordButton.setOnClickListener(mRerecordListener);
+        mRerecordButton.setOnClickListener(new ConfirmDelete(new ContinueRerecord()));
 
-        mListenMoreButton = (Button) findViewById(R.id.speakHeadphonesButton);
-        mListenMoreButton.setOnClickListener(new View.OnClickListener() {
+        mDoneButton = (Button) findViewById(R.id.speakDoneButton);
+        mDoneButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // TODO: quick hack - not the best way to do it
-                startActivity(new Intent(getApplicationContext(), ClassRegistry.get("RwListenActivity")));
+                finish();
             }
         });
+        int doneIcon = getIntent().getIntExtra(EXTRA_KEY_DONE_ICON, -1);
+        if( -1 != doneIcon ){
+            Drawable drawable = getResources().getDrawable(doneIcon);
+            if(drawable != null) {
+                drawable.setBounds(0, 0, drawable.getIntrinsicWidth(), drawable.getIntrinsicHeight());
+                mDoneButton.setCompoundDrawables(null, drawable, null, null);
+            }
+        }
+        int doneText = getIntent().getIntExtra(EXTRA_KEY_DONE_TEXT, -1);
+        if( -1 != doneText ){
+            mDoneButton.setText(doneText);
+        }
 
         mSpeakMoreButton = (Button) findViewById(R.id.speakMicButton);
         mSpeakMoreButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // TODO: quick hack - not the best way to do it
-                startActivity(new Intent(getApplicationContext(), ClassRegistry.get("RwSpeakActivity")));
+                setFlipperChild(FILTER_LAYOUT);
             }
         });
     }
 
 
     private void cancel() {
-        stopRecording();
-        stopRecordingPlayback();
+        //leaveRecordingState(mCurrentRecordingState);
         finish();
     }
 
@@ -545,43 +600,19 @@ public class RwSpeakActivity extends Activity {
             mRecordButton.setEnabled(false);
             mRerecordButton.setEnabled(false);
             mUploadButton.setEnabled(false);
-        } else {
-            // connected to RWService
-
-            // Show LegalDialog if needed
-            mViewFlipper.setVisibility(View.VISIBLE);
-            if (mIsRecordingGeneralFeedback) {
-                showGeneralFeedback();
-            } else {
-                showFilters();
-            }
-
-            mRecordButton.setEnabled(true);
-            if (mPlayer != null) {
-                changeToRecordingPlaybackUIState();
-            } else {
-                if ((mRecordingTask != null) && (mRecordingTask.isRecording())) {
-                    changeToRecordingUIState();
-                } else {
-                    changeToNotRecordingUIState();
-                }
-            }
         }
-        updateScreenForSelectedTags();
     }
 
 
     /**
      * Updates the UI for recording playback state.
      */
-    private void changeToRecordingPlaybackUIState() {
-        showRecord();
-
+    private void changeToPlaybackUI() {
         // change record toggle button
         Drawable img = getResources().getDrawable(R.drawable.speak_play_pause_button);
         mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
         mRecordButton.setEnabled(true);
-        mRecordButton.setChecked(false);
+        mRecordButton.setChecked(true);
 
         // update counter, level meter and instructions
         mSpeakInstructionsView.setVisibility(View.INVISIBLE);
@@ -598,13 +629,11 @@ public class RwSpeakActivity extends Activity {
     /**
      * Updates the UI for recording lead-in playback state.
      */
-    private void changeToRecordingLeadInUIState() {
-        showRecord();
-
+    private void changeToRecordingLeadInUI() {
         // change record toggle button
         Drawable img = getResources().getDrawable(R.drawable.speak_record_pause_button);
         mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
-        mRecordButton.setEnabled(false);
+        mRecordButton.setEnabled(true);
         mRecordButton.setChecked(true);
 
         // update counter, level meter and instructions
@@ -615,18 +644,14 @@ public class RwSpeakActivity extends Activity {
 
         // set other button states and handlers
         mRerecordButton.setEnabled(false);
-        mRerecordButton.setOnClickListener(null);
         mUploadButton.setEnabled(false);
-        mUploadButton.setOnClickListener(null);
     }
 
 
     /**
      * Updates the UI for recording in progress state.
      */
-    private void changeToRecordingUIState() {
-        showRecord();
-
+    private void changeToRecordingUI() {
         // change record toggle button
         Drawable img = getResources().getDrawable(R.drawable.speak_record_pause_button);
         mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
@@ -640,16 +665,14 @@ public class RwSpeakActivity extends Activity {
 
         // set other button states and handlers
         mRerecordButton.setEnabled(false);
-        mRerecordButton.setOnClickListener(null);
         mUploadButton.setEnabled(false);
-        mUploadButton.setOnClickListener(null);
     }
 
 
     /**
      * Updates the UI for not recording state.
      */
-    private void changeToNotRecordingUIState() {
+    private void changeToPromptUI() {
         // update counter, level meter and instructions
         mSpeakInstructionsView.setVisibility(View.VISIBLE);
         mRecordingTimeText.setVisibility(View.INVISIBLE);
@@ -657,22 +680,18 @@ public class RwSpeakActivity extends Activity {
         mRecordingLevelMeterLayout.setVisibility(View.INVISIBLE);
 
         // set button states and handlers
-        mRerecordButton.setEnabled(mHasRecording);
-        mUploadButton.setEnabled(mHasRecording);
+        boolean isPlayback = mCurrentRecordingState == RecordingState.PLAYBACK_PROMPT;
+        mRerecordButton.setEnabled(isPlayback);
+        mUploadButton.setEnabled(isPlayback);
 
         mRecordButton.setEnabled(true);
         mRecordButton.setChecked(false);
-        if (mHasRecording) {
-            Drawable img = getResources().getDrawable(R.drawable.speak_play_pause_button);
-            mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
-            mRerecordButton.setOnClickListener(new ConfirmDelete(new ContinueRerecord()));
-            mUploadButton.setOnClickListener(mSubmitListener);
-        } else {
-            Drawable img = getResources().getDrawable(R.drawable.speak_record_pause_button);
-            mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
-            mRerecordButton.setOnClickListener(null);
-            mUploadButton.setOnClickListener(mSubmitListener);
-        }
+
+        Drawable img = getResources().getDrawable(isPlayback ?
+                R.drawable.speak_play_pause_button :
+                R.drawable.speak_record_pause_button);
+        mRecordButton.setCompoundDrawablesWithIntrinsicBounds(null, img, null, null);
+
     }
 
 
@@ -712,7 +731,7 @@ public class RwSpeakActivity extends Activity {
 
         final Handler handler = new Handler();
 
-        changeToRecordingLeadInUIState();
+        changeToRecordingLeadInUI();
 
         // start timer that plays the four sounds in the SoundPool
         if (mRecordingLeadInTimer != null) {
@@ -723,8 +742,10 @@ public class RwSpeakActivity extends Activity {
         mRecordingLeadInTimer.schedule(new TimerTask() {
             @Override
             public void run() {
-                if (mLeadInCounter < mLeadInSoundIds.length) {
-                    if (D) { Log.d(TAG, "playing lead in sound " + mLeadInCounter); }
+                if (mLeadInCounter >= 0 && mLeadInCounter < mLeadInSoundIds.length) {
+                    if (D) {
+                        Log.d(TAG, "playing lead in sound " + mLeadInCounter);
+                    }
                     mSoundPool.play(mLeadInSoundIds[mLeadInCounter], 1, 1, 0, 0, 1);
                 }
                 mLeadInCounter++;
@@ -732,9 +753,11 @@ public class RwSpeakActivity extends Activity {
                 handler.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (mLeadInCounter < mLeadInText.length) {
-                            if (D) { Log.d(TAG, "displaying lead in text '" + mLeadInText[mLeadInCounter-1] + "'"); }
-                            mRecordingTimeText.setText(mLeadInText[mLeadInCounter-1]);
+                        if (mLeadInCounter > 0 && mLeadInCounter < mLeadInText.length) {
+                            if (D) {
+                                Log.d(TAG, "displaying lead in text '" + mLeadInText[mLeadInCounter - 1] + "'");
+                            }
+                            mRecordingTimeText.setText(mLeadInText[mLeadInCounter - 1]);
                         }
                     }
                 });
@@ -743,9 +766,10 @@ public class RwSpeakActivity extends Activity {
                     handler.post(new Runnable() {
                         @Override
                         public void run() {
-                            if (D) { Log.d(TAG, "stopping lead in"); }
-                            stopRecordingLeadIn();
-                            startRecording();
+                            if (D) {
+                                Log.d(TAG, "stopping lead in");
+                            }
+                            setRecordingState(RecordingState.RECORDING);
                         }
                     });
                 }
@@ -775,7 +799,7 @@ public class RwSpeakActivity extends Activity {
 
         final Handler handler = new Handler();
         resetLevelMeter();
-        changeToRecordingUIState();
+        changeToRecordingUI();
 
         // pause time to let final lead-in sound die out
         try {
@@ -809,7 +833,7 @@ public class RwSpeakActivity extends Activity {
                     handler.post(new Runnable() {
                         @Override
                         public void run() {
-                            stopRecording();
+                            setRecordingState(RecordingState.PLAYBACK_PROMPT);
                         }
                     });
                 }
@@ -868,8 +892,6 @@ public class RwSpeakActivity extends Activity {
     private void stopRecording() {
         if ((mRecordingTask != null) && (mRecordingTask.isRecording())) {
             mRecordingTask.stopRecording();
-            mHasRecording = true;
-            changeToNotRecordingUIState();
         }
     }
 
@@ -878,8 +900,7 @@ public class RwSpeakActivity extends Activity {
      * Starts playback of a recording that has been made.
      */
     private void startRecordingPlayback() {
-        stopRecording();
-        if ((mRecordingTask != null) && (mHasRecording)) {
+        if (mRecordingTask != null) {
             String recordingFileName = mRecordingTask.getRecordingFileName();
             if (mPlayer != null) {
                 stopRecordingPlayback();
@@ -891,7 +912,7 @@ public class RwSpeakActivity extends Activity {
             mPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
                 @Override
                 public void onCompletion(MediaPlayer mp) {
-                    stopRecordingPlayback();
+                    setRecordingState(RecordingState.PLAYBACK_PROMPT);
                 }
             });
 
@@ -902,7 +923,6 @@ public class RwSpeakActivity extends Activity {
 
                 mPlaybackHandler = new Handler();
                 mPlaybackHandler.postDelayed(updatePreviewStatus, 1000);
-                changeToRecordingPlaybackUIState();
             } catch (IOException e) {
                 Log.e(TAG, "Can not play back the recording!", e);
             }
@@ -938,21 +958,6 @@ public class RwSpeakActivity extends Activity {
             mPlaybackHandler = null;
             mPlaybackTimerCount = 0;
         }
-
-        changeToNotRecordingUIState();
-    }
-
-
-    /**
-     * Resets recording state back to initial state.
-     */
-    private void resetRecording() {
-        if (mRecordingTask != null) {
-            stopRecording();
-            mRecordingTask.resetRecording();
-            mHasRecording = false;
-        }
-        changeToNotRecordingUIState();
     }
 
 
@@ -991,11 +996,6 @@ public class RwSpeakActivity extends Activity {
      */
     private void submitRecording() {
         if (mRecordingTask != null) {
-            stopRecording();
-            mHasRecording = false;
-            mUploadButton.setEnabled(false);
-            changeToNotRecordingUIState();
-
             if (mIsRecordingGeneralFeedback) {
                 // feedback recording submit
                 RWTags tags = new RWTags();
@@ -1017,13 +1017,12 @@ public class RwSpeakActivity extends Activity {
                     ll.setVisibility(View.VISIBLE);
                     Location loc = mRwBinder.getLastKnownLocation();
                     showMarkerOnMap(loc.getLatitude(), loc.getLongitude());
-                    mViewFlipper.setDisplayedChild(THANKS_LAYOUT);
                 } else {
                     // no map available, hide view to show background
                     ll.setVisibility(View.INVISIBLE);
-                    mViewFlipper.showNext();
-                    // showRecordingSubmittedDialog();
+                    mBackgroundImageView.setVisibility(View.VISIBLE);
                 }
+                setFlipperChild(THANKS_LAYOUT);
             }
         }
     }
@@ -1125,7 +1124,7 @@ public class RwSpeakActivity extends Activity {
     private class ContinueRerecord implements DialogInterface.OnClickListener {
         public void onClick(DialogInterface dialog, int whichButton) {
             dialog.cancel();
-            resetRecording();
+            setRecordingState(RecordingState.RECORD_PROMPT);
         }
     }
 
@@ -1185,12 +1184,32 @@ public class RwSpeakActivity extends Activity {
         }
     }
 
+    /**
+     * Shows a legal dialog if needed or directly shows the Speak Activity
+     * @param context
+     * @param rwService
+    **/
     public static void showLegalDialogIfNeeded(final Context context, RWService rwService) {
+        showLegalDialogIfNeeded(context, rwService, -1, -1);
+    }
+
+    /**
+     * Shows a legal dialog if needed or directly shows the Speak Activity
+     * @param context
+     * @param rwService
+     * @param doneIcon resId of done button's icon (optional)
+     * @param doneText resId of done button's text label (optional)
+     */
+    public static void showLegalDialogIfNeeded(final Context context, RWService rwService, final int doneIcon, final int doneText) {
         String legalText = rwService.getConfiguration().getLegalAgreement();
         boolean accepted = Settings.getSharedPreferences().getBoolean(PREFS_KEY_LEGAL_NOTICE_ACCEPTED, false);
 
+        final Intent intent = new Intent(context, ClassRegistry.get("RwSpeakActivity"));
+        intent.putExtra(RwSpeakActivity.EXTRA_KEY_DONE_ICON, doneIcon);
+        intent.putExtra(RwSpeakActivity.EXTRA_KEY_DONE_TEXT, doneText);
+
         if (accepted) {
-            context.startActivity(new Intent(context, ClassRegistry.get("RwSpeakActivity")));
+            context.startActivity(intent);
         } else {
             AlertDialog.Builder builder;
             builder = new AlertDialog.Builder(context);
@@ -1200,7 +1219,7 @@ public class RwSpeakActivity extends Activity {
                 @Override
                 public void onClick(DialogInterface dialog, int which) {
                     Settings.getSharedPreferences().edit().putBoolean(PREFS_KEY_LEGAL_NOTICE_ACCEPTED, true).commit();
-                    context.startActivity(new Intent(context, ClassRegistry.get("RwSpeakActivity")));
+                    context.startActivity(intent);
                     dialog.dismiss();
                 }
             });
@@ -1216,6 +1235,7 @@ public class RwSpeakActivity extends Activity {
     }
 
     private void showRecord() {
+        mBackgroundImageView.setVisibility(View.VISIBLE);
         mViewFlipper.setDisplayedChild(RECORD_LAYOUT);
 
         mTitleView.setText(R.string.record_button);
@@ -1224,17 +1244,21 @@ public class RwSpeakActivity extends Activity {
         mRightTitleButton.setVisibility(View.VISIBLE);
         mRightTitleButton.setText(R.string.cancel);
         mRightTitleButton.setOnClickListener(mCancelListener);
+        setRecordingState(mCurrentRecordingState);
     }
 
     private void showFilters() {
+        mBackgroundImageView.setVisibility(View.INVISIBLE);
         mViewFlipper.setDisplayedChild(FILTER_LAYOUT);
     }
 
     private void showThanks() {
+        mBackgroundImageView.setVisibility(mGoogleMap == null ? View.VISIBLE : View.INVISIBLE);
         mViewFlipper.setDisplayedChild(THANKS_LAYOUT);
     }
 
     private void showGeneralFeedback() {
+        mBackgroundImageView.setVisibility(View.VISIBLE);
         mViewFlipper.setDisplayedChild(RECORD_LAYOUT);
 
         mTitleView.setText(R.string.speak_feedback_header_text);
@@ -1242,5 +1266,97 @@ public class RwSpeakActivity extends Activity {
         mRightTitleButton.setVisibility(View.VISIBLE);
         mRightTitleButton.setText(R.string.cancel);
         mRightTitleButton.setOnClickListener(mCancelListener);
+    }
+
+
+
+    @Override
+    public void onBackPressed() {
+        boolean handled = false;
+        switch (mViewFlipper.getDisplayedChild()){
+            case THANKS_LAYOUT:
+                setFlipperChild(RECORD_LAYOUT);
+                handled = true;
+                break;
+            case RECORD_LAYOUT:
+                setRecordingState(RecordingState.RECORD_PROMPT);
+                if (!mIsRecordingGeneralFeedback) {
+                    setFlipperChild(FILTER_LAYOUT);
+                    handled = true;
+                }
+                break;
+        }
+        if(!handled) {
+            super.onBackPressed();
+        }
+    }
+
+    private void setFlipperChild( int newLayout){
+        int oldLayout = mViewFlipper.getDisplayedChild();
+        switch(oldLayout){
+            case RECORD_LAYOUT:
+                setRecordingState(RecordingState.RECORD_PROMPT);
+                break;
+        }
+
+        switch (newLayout)
+        {
+            case FILTER_LAYOUT:
+                mIsPendingFilterLoad = true;
+                if(!TextUtils.isEmpty(mWebViewBaseUrl)) {
+                    mWebView.loadDataWithBaseURL(mWebViewBaseUrl, mWebViewData, null, null, null);
+                }
+                break;
+            case RECORD_LAYOUT:
+                //? setRecordingState(RecordingState.RECORD_PROMPT);
+                if (!mIsRecordingGeneralFeedback) {
+                    showRecord();
+                }else{
+                    showGeneralFeedback();
+                }
+                break;
+            case THANKS_LAYOUT:
+                showThanks();
+                break;
+        }
+    }
+
+    private void leaveRecordingState(RecordingState oldState){
+        switch (oldState){
+            case RECORD_PROMPT:
+                break;
+            case LEADIN_COUNTDOWN:
+                stopRecordingLeadIn();
+                break;
+            case RECORDING:
+                stopRecording();
+                break;
+            case PLAYBACK_PROMPT:
+                break;
+            case PLAYING:
+                stopRecordingPlayback();
+                break;
+        }
+    }
+
+    private void setRecordingState( RecordingState state ){
+        leaveRecordingState(mCurrentRecordingState);
+        mCurrentRecordingState = state;
+        switch(state){
+            case RECORD_PROMPT:
+            case PLAYBACK_PROMPT:
+                changeToPromptUI();
+                break;
+            case LEADIN_COUNTDOWN:
+                startRecordingLeadIn();
+                break;
+            case RECORDING:
+                startRecording();
+                break;
+            case PLAYING:
+                changeToPlaybackUI();
+                startRecordingPlayback();
+                break;
+        }
     }
 }
